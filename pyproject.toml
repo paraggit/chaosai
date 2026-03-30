@@ -1,0 +1,19 @@
+[project]
+name = "chaosminds"
+version = "0.1.0"
+description = "Multi-agent chaos engineering system for ODF/OCS clusters"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiofiles>=24.1.0",
+    "beeai-framework>=0.1.79",
+    "pydantic>=2.12.5",
+    "python-dotenv>=1.2.2",
+]
+
+[project.scripts]
+chaosminds = "chaosminds.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

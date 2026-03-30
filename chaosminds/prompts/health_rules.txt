@@ -1,0 +1,73 @@
+# ═══════════════════════════════════════════════════════════
+# Cluster Health Rules
+# ═══════════════════════════════════════════════════════════
+# Edit these rules to control how ChaosMinds classifies
+# cluster health as HEALTHY, DEGRADED, or CRITICAL.
+# The tool reads this file and applies rules against the
+# raw cluster data collected via oc commands.
+# ═══════════════════════════════════════════════════════════
+
+# ── CRITICAL (abort chaos, cluster is unsafe) ──
+# Any of these conditions → overall_status = CRITICAL
+critical:
+  - ceph_status == HEALTH_ERR
+  - pods_crashloop >= 1
+  - storagecluster_error >= 1
+  - ceph_crash_count >= 1
+  - nodes_not_ready >= 2
+  - pods_failed >= 3
+  - pvcs_lost >= 1
+
+# ── DEGRADED (proceed with caution, log warnings) ──
+# Any of these conditions → overall_status = DEGRADED
+degraded:
+  - ceph_status == HEALTH_WARN
+  - nodes_not_ready >= 1
+  - pods_pending >= 3
+  - pods_failed >= 1
+  - pvcs_pending >= 1
+
+# ── HEALTHY (all clear, safe to inject chaos) ──
+# None of the above triggered → overall_status = HEALTHY
+# Additionally, these must ALL be true:
+healthy:
+  - ceph_status == HEALTH_OK
+  - nodes_not_ready == 0
+  - pods_failed == 0
+  - pods_pending == 0
+  - pods_crashloop == 0
+  - pvcs_pending == 0
+  - pvcs_lost == 0
+  - storagecluster_error == 0
+  - ceph_crash_count == 0
+
+# ── ODF-SPECIFIC CHECKS ──
+# Pods that are expected to exist in openshift-storage.
+# If any are missing or not Running, flag as DEGRADED.
+expected_pods:
+  - app=rook-ceph-osd
+  - app=rook-ceph-mon
+  - app=rook-ceph-mgr
+  - app=rook-ceph-mds
+  - app=csi-cephfsplugin
+  - app=csi-rbdplugin
+
+# Ceph checks that should be treated as CRITICAL (not just WARN)
+critical_ceph_checks:
+  - OSD_DOWN
+  - OSD_NEARFULL
+  - OSD_FULL
+  - MON_DOWN
+  - MDS_ALL_DOWN
+  - MDS_DAMAGE
+  - FS_DEGRADED
+  - PG_NOT_SCRUBBED
+  - PG_NOT_DEEP_SCRUBBED
+  - RECENT_CRASH
+
+# Ceph checks that are warnings but not blockers
+warn_ceph_checks:
+  - HEALTH_WARN
+  - TOO_FEW_PGS
+  - POOL_NEARFULL
+  - SLOW_OPS
