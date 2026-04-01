@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from pathlib import Path
 
 from beeai_framework.agents.tool_calling.agent import ToolCallingAgent
@@ -46,36 +47,58 @@ class WaitAgent:
         self.timeout = timeout
         self.poll_interval = poll_interval
 
-    async def wait_for_completion(self, step: dict, state: WorkflowState) -> WorkflowState:
+    async def wait_for_completion(
+        self, step: dict, state: WorkflowState,
+    ) -> WorkflowState:
         step_id = step.get("id", -1)
         elapsed = 0
+        poll = self.poll_interval
+        max_poll = 60
+        prev_running: bool | None = None
 
-        logger.info("[WaitAgent] Waiting for chaos completion (timeout=%ds, poll=%ds)",
-                     self.timeout, self.poll_interval)
+        logger.info(
+            "[WaitAgent] Waiting for chaos completion "
+            "(timeout=%ds, poll=%ds→%ds cap)",
+            self.timeout, self.poll_interval, max_poll,
+        )
 
         while elapsed < self.timeout:
             try:
                 result = await self.list_tool.run({})
                 text = result.get_text_content()
 
-                logger.info("[WaitAgent] Poll at %ds — krknctl list output:\n%s", elapsed, text[:1000])
+                logger.info(
+                    "[WaitAgent] Poll at %ds — krknctl list output:\n%s",
+                    elapsed, text[:1000],
+                )
 
                 still_running = self._has_running_scenarios(text)
+                if prev_running is not None and still_running != prev_running:
+                    poll = self.poll_interval
+                prev_running = still_running
 
                 if not still_running:
-                    logger.info("[WaitAgent] All chaos scenarios completed after %ds", elapsed)
+                    logger.info(
+                        "[WaitAgent] All chaos scenarios completed after %ds",
+                        elapsed,
+                    )
                     state.log_step(
                         step_id=step_id,
                         tool="wait",
                         action="wait for chaos completion",
                         status="success",
-                        output=f"All chaos scenarios completed after {elapsed}s\n{text}",
+                        output=(
+                            f"All chaos scenarios completed after {elapsed}s\n{text}"
+                        ),
                     )
                     return state
 
                 lower = text.lower()
                 if "error" in lower and "running" not in lower:
-                    logger.error("[WaitAgent] Chaos scenario error detected:\n%s", text)
+                    logger.error(
+                        "[WaitAgent] Chaos scenario error detected:\n%s",
+                        text,
+                    )
                     state.log_step(
                         step_id=step_id,
                         tool="wait",
@@ -89,8 +112,9 @@ class WaitAgent:
             except Exception as e:
                 logger.warning("[WaitAgent] Error polling krknctl list: %s", e)
 
-            await asyncio.sleep(self.poll_interval)
-            elapsed += self.poll_interval
+            await asyncio.sleep(poll)
+            elapsed += poll
+            poll = min(poll * 2, max_poll)
 
         logger.error("[WaitAgent] Timed out after %ds", self.timeout)
         state.log_step(
@@ -103,9 +127,13 @@ class WaitAgent:
         state.phase = Phase.FAILED
         return state
 
-    @staticmethod
-    def _has_running_scenarios(list_output: str) -> bool:
-        """Return True if krknctl list shows any scenario still running."""
+    _KRKNCTL_CONTAINER_RE = re.compile(
+        r"\bkrknctl-[a-zA-Z0-9_.-]+\b",
+    )
+
+    @classmethod
+    def _has_running_scenarios(cls, list_output: str) -> bool:
+        """True if krknctl list output names at least one krknctl-* container."""
         lower = list_output.lower().strip()
         if not lower:
             return False
@@ -119,16 +147,4 @@ class WaitAgent:
             if phrase in lower:
                 return False
 
-        lines = [
-            ln.strip() for ln in lower.splitlines()
-            if ln.strip()
-            and not ln.strip().startswith("container runtime")
-        ]
-        if not lines:
-            return False
-
-        for indicator in ("running", "in progress", "started"):
-            for line in lines:
-                if indicator in line:
-                    return True
-        return False
+        return bool(cls._KRKNCTL_CONTAINER_RE.search(list_output))

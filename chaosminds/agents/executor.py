@@ -1,17 +1,22 @@
 from __future__ import annotations
 
+import copy
 import json
 import logging
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from beeai_framework.agents.tool_calling.agent import ToolCallingAgent
 from beeai_framework.agents.types import AgentMeta
 from beeai_framework.backend.chat import ChatModel
 
 from chaosminds.agents._prompts import system_prompt_template
+from chaosminds.iteration_placeholders import expand_iteration_placeholders
 from chaosminds.state import WorkflowState
 from chaosminds.tools.bob_cli_tool import BobCliTool
 from chaosminds.tools.kubectl_tool import OcTool
+from chaosminds.tools.oc_validation import OcValidationTool
 
 logger = logging.getLogger(__name__)
 
@@ -19,11 +24,23 @@ PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
 
 class ExecutorAgent:
-    """Runs ODF storage operations via BOB CLI and oc."""
+    """Runs ODF storage operations via BOB CLI and oc.
 
-    def __init__(self, llm: ChatModel, bob_tool: BobCliTool, oc_tool: OcTool) -> None:
+    Has access to OcValidationTool so it can self-check
+    commands (especially wait conditions) before executing.
+    """
+
+    def __init__(
+        self,
+        llm: ChatModel,
+        bob_tool: BobCliTool,
+        oc_tool: OcTool,
+        rag_tools: Sequence[Any] | None = None,
+    ) -> None:
         system_prompt = (PROMPTS_DIR / "executor_system.txt").read_text()
-        tools = [bob_tool, oc_tool]
+        tools: list[Any] = [bob_tool, oc_tool, OcValidationTool()]
+        if rag_tools:
+            tools.extend(rag_tools)
 
         self.agent = ToolCallingAgent(
             llm=llm,
@@ -39,8 +56,12 @@ class ExecutorAgent:
         )
 
     async def execute(self, step: dict, state: WorkflowState) -> WorkflowState:
+        step_run = expand_iteration_placeholders(
+            copy.deepcopy(step),
+            idx=1,
+        )
         prompt = (
-            f"Execute this step:\n{json.dumps(step, indent=2)}\n\n"
+            f"Execute this step:\n{json.dumps(step_run, indent=2)}\n\n"
             f"Current cluster health:\n{json.dumps(state.cluster_health, indent=2)}\n\n"
             "Use the appropriate tool (bob_cli or oc) based on the step's 'tool' field. "
             "Report the result."

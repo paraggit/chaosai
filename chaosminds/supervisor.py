@@ -2,19 +2,25 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import subprocess
 from collections import defaultdict
 from datetime import datetime, timezone
+from pathlib import Path
 
 from beeai_framework.adapters.ollama.backend.chat import OllamaChatModel
 
+from chaosminds.agents.analysis import AnalysisAgent
 from chaosminds.agents.chaos import ChaosAgent
 from chaosminds.agents.executor import ExecutorAgent
 from chaosminds.agents.monitor import ClusterMonitorAgent
 from chaosminds.agents.planner import PlannerAgent
 from chaosminds.agents.waiter import WaitAgent
 from chaosminds.config import AppConfig
+from chaosminds.rag.factory import build_rag_tools
 from chaosminds.state import Phase, WorkflowState
 from chaosminds.tools.bob_cli_tool import BobCliTool
+from chaosminds.tools.cluster_discovery import ClusterDiscoveryTool
 from chaosminds.tools.cluster_health import ClusterHealthTool
 from chaosminds.tools.krknctl_tool import KrknctlListTool, KrknctlTool
 from chaosminds.tools.kubectl_tool import OcTool
@@ -51,10 +57,27 @@ class Supervisor:
         self.health_tool = ClusterHealthTool(
             oc_path=config.oc_path, kubeconfig=config.kubeconfig
         )
+        self.discovery_tool = ClusterDiscoveryTool(
+            oc_path=config.oc_path, kubeconfig=config.kubeconfig
+        )
 
-        self.planner = PlannerAgent(self.llm, config.scenario_plan)
-        self.executor = ExecutorAgent(self.llm, self.bob_tool, self.oc_tool)
-        self.chaos_agent = ChaosAgent(self.llm, self.krknctl_tool)
+        rag_tools = build_rag_tools(config.rag)
+        if rag_tools:
+            logger.info(
+                "[Supervisor] RAG tools enabled (%d): ocs-ci codebase search",
+                len(rag_tools),
+            )
+
+        self.planner = PlannerAgent(
+            self.llm, config.scenario_plan, rag_tools=rag_tools,
+        )
+        self.executor = ExecutorAgent(
+            self.llm, self.bob_tool, self.oc_tool, rag_tools=rag_tools,
+        )
+        self.chaos_agent = ChaosAgent(
+            self.llm, self.krknctl_tool, self.discovery_tool,
+            rag_tools=rag_tools,
+        )
         self.wait_agent = WaitAgent(
             self.llm,
             self.krknctl_list_tool,
@@ -62,6 +85,7 @@ class Supervisor:
             poll_interval=config.chaos_poll_interval,
         )
         self.monitor = ClusterMonitorAgent(self.llm, self.health_tool)
+        self.analysis_agent = AnalysisAgent(self.llm, config)
 
     def _log_phase(self, old: Phase, new: Phase) -> None:
         if old != new:
@@ -97,6 +121,16 @@ class Supervisor:
         logger.info("[Supervisor] Phase 1: PLANNING")
         state = await self.planner.plan(state)
         self._log_phase(old_phase, state.phase)
+
+        if not state.plan_steps and state.structured_plan:
+            state.plan_steps = PlannerAgent._flatten_plan(
+                state.structured_plan,
+            )
+            logger.info(
+                "[Supervisor] Rebuilt %d plan_steps from "
+                "structured_plan",
+                len(state.plan_steps),
+            )
 
         if not state.plan_steps:
             state.phase = Phase.FAILED
@@ -185,16 +219,45 @@ class Supervisor:
                 logger.error("[Supervisor] Pipeline FAILED at step %s — aborting remaining steps", step_id)
                 break
 
+            # Monitor feedback: if cluster went CRITICAL during
+            # test_ops, log a warning but allow the agent loop to
+            # continue — the pre-step check will skip further chaos.
+            if step.get("phase") == "test_ops" and self._is_cluster_critical(state):
+                logger.warning(
+                    "[Supervisor] Cluster CRITICAL during test_ops "
+                    "after step %s — monitor flagged for review", step_id,
+                )
+
+        # ── Post-chaos analysis (prompt → bob) ──
+        run_ts = datetime.now(
+            timezone.utc,
+        ).strftime("%Y%m%d_%H%M%S")
+        analysis = await self.analysis_agent.analyze(
+            instruction, run_id=run_ts,
+        )
+        state.analysis = analysis
+
+        # ── Pre-cleanup checks + resource cleanup ──
+        self._precheck_before_cleanup(state)
+        self._resource_cleanup()
+
         # ── Final ──
-        elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+        elapsed = (
+            datetime.now(timezone.utc) - start_time
+        ).total_seconds()
         if state.phase != Phase.FAILED:
             state.phase = Phase.COMPLETED
 
         logger.info("=" * 60)
-        logger.info("[Supervisor] Workflow finished: phase=%s  elapsed=%.1fs  errors=%d",
-                     state.phase.name, elapsed, len(state.errors))
+        logger.info(
+            "[Supervisor] Workflow finished: "
+            "phase=%s  elapsed=%.1fs  errors=%d",
+            state.phase.name, elapsed, len(state.errors),
+        )
 
-        state.final_report = self._generate_report(state, elapsed)
+        state.final_report = self._generate_report(
+            state, elapsed,
+        )
         logger.info("\n%s", state.final_report)
         return state
 
@@ -233,6 +296,96 @@ class Supervisor:
 
         return result
 
+    def _run_oc_cmd(self, args: str) -> str:
+        """Run an oc command and return combined output."""
+        from chaosminds.cmd_split import (
+            UnsafeCommandError,
+            split_command,
+        )
+
+        try:
+            parts = split_command(args)
+        except UnsafeCommandError as exc:
+            logger.error("[cleanup-oc] unsafe command: %s", exc)
+            return ""
+        cmd = [self.config.oc_path, *parts]
+        env = None
+        if self.config.kubeconfig:
+            env = {**os.environ, "KUBECONFIG": self.config.kubeconfig}
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=120, env=env,
+            )
+            output = result.stdout.strip()
+            if result.stderr:
+                output += "\n" + result.stderr.strip()
+            logger.info("[cleanup-oc] %s → exit=%d",
+                        args, result.returncode)
+            return output
+        except subprocess.TimeoutExpired:
+            logger.error("[cleanup-oc] timed out: %s", args)
+            return ""
+
+    def _precheck_before_cleanup(self, state: WorkflowState) -> None:
+        """Run pre-cleanup validations. Extend this method for future checks."""
+        logger.info("=" * 60)
+        logger.info("[Supervisor] PRE-CLEANUP CHECKS")
+
+        if self.config.collect_must_gather:
+            self._collect_must_gather()
+        else:
+            logger.info("[precheck] COLLECT_MUST_GATHER=false — skipping")
+
+        out = self._run_oc_cmd(
+            "exec -n openshift-storage deploy/rook-ceph-tools -- ceph health",
+        )
+        logger.info("[precheck] Ceph health: %s", out.split("\n")[0] if out else "unknown")
+
+        # Add future pre-cleanup checks below this line
+
+        logger.info("[Supervisor] END PRE-CLEANUP CHECKS")
+
+    def _collect_must_gather(self) -> None:
+        """Collect ODF must-gather logs."""
+        logger.info("[must-gather] Collecting must-gather logs...")
+        mg_dir = Path("must-gather") / f"must-gather_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+        mg_dir.mkdir(parents=True, exist_ok=True)
+
+        cmd = [
+            self.config.oc_path, "adm", "must-gather",
+            "--image=quay.io/ocs-dev/ocs-must-gather",
+            f"--dest-dir={mg_dir}",
+        ]
+        env = None
+        if self.config.kubeconfig:
+            env = {**os.environ, "KUBECONFIG": self.config.kubeconfig}
+
+        logger.info("[must-gather] command: %s", " ".join(cmd))
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=600, env=env,
+            )
+            logger.info("[must-gather] exit_code=%d", result.returncode)
+            if result.stdout:
+                logger.info("[must-gather] stdout:\n%s", result.stdout[:3000])
+            if result.stderr:
+                logger.info("[must-gather] stderr:\n%s", result.stderr[:2000])
+        except subprocess.TimeoutExpired:
+            logger.error("[must-gather] Timed out after 600s")
+
+        file_count = sum(1 for _ in mg_dir.rglob("*") if _.is_file())
+        logger.info("[must-gather] Collected %d files → %s", file_count, mg_dir)
+
+    def _resource_cleanup(self) -> None:
+        """Delete test resources (chaos-test-* snapshots, PVCs, pods)."""
+        from chaosminds.cleanup import cleanup_from_config
+
+        logger.info("[Supervisor] RESOURCE CLEANUP")
+        cleanup_from_config(self.config, logger)
+        logger.info("[Supervisor] END RESOURCE CLEANUP")
+
     @staticmethod
     def _is_cluster_critical(state: WorkflowState) -> bool:
         health = state.cluster_health
@@ -250,7 +403,9 @@ class Supervisor:
         return False
 
     @staticmethod
-    def _generate_report(state: WorkflowState, elapsed: float) -> str:
+    def _generate_report(
+        state: WorkflowState, elapsed: float,
+    ) -> str:
         lines = [
             "=" * 60,
             "  ChaosMinds — Workflow Report",
@@ -265,19 +420,47 @@ class Supervisor:
             "  Step Results:",
         ]
 
+        status_map = {
+            "success": "PASS", "failed": "FAIL",
+            "skipped": "SKIP",
+        }
         for r in state.execution_log:
-            marker = {"success": "PASS", "failed": "FAIL", "skipped": "SKIP"}.get(r.status, "????")
-            lines.append(f"    [{marker}] Step {r.step_id}: {r.action}")
+            marker = status_map.get(r.status, "????")
+            lines.append(
+                f"    [{marker}] Step {r.step_id}: {r.action}"
+            )
             if r.error:
                 lines.append(f"           Error: {r.error}")
+
+        # Analysis findings
+        analysis = getattr(state, "analysis", None)
+        if analysis:
+            lines.append("-" * 60)
+            lines.append(
+                f"  Analysis Verdict: {analysis['verdict']}"
+            )
+            lines.append(
+                f"  Bugs: {analysis['bugs']}  "
+                f"Warnings: {analysis['warnings']}"
+            )
+            if analysis.get("findings"):
+                lines.append("  Findings:")
+                for f in analysis["findings"]:
+                    lines.append(f"    - {f}")
 
         if state.health_timeline:
             lines.append("-" * 60)
             lines.append("  Health Timeline:")
             for snap in state.health_timeline:
                 h = snap.get("health", {})
-                lines.append(f"    {snap['timestamp']} [{snap['phase']}] "
-                             f"status={h.get('overall_status', '?')}  healthy={h.get('overall_healthy', '?')}")
+                lines.append(
+                    f"    {snap['timestamp']} "
+                    f"[{snap['phase']}] "
+                    f"status="
+                    f"{h.get('overall_status', '?')}  "
+                    f"healthy="
+                    f"{h.get('overall_healthy', '?')}"
+                )
 
         if state.errors:
             lines.append("-" * 60)

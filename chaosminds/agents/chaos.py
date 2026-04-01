@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from beeai_framework.agents.tool_calling.agent import ToolCallingAgent
 from beeai_framework.agents.types import AgentMeta
@@ -10,6 +12,7 @@ from beeai_framework.backend.chat import ChatModel
 
 from chaosminds.agents._prompts import system_prompt_template
 from chaosminds.state import Phase, WorkflowState
+from chaosminds.tools.cluster_discovery import ClusterDiscoveryTool
 from chaosminds.tools.krknctl_tool import KrknctlTool
 
 logger = logging.getLogger(__name__)
@@ -18,11 +21,27 @@ PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
 
 class ChaosAgent:
-    """Injects chaos scenarios using krknctl."""
+    """Injects chaos scenarios using krknctl.
 
-    def __init__(self, llm: ChatModel, krknctl_tool: KrknctlTool) -> None:
+    Has access to ClusterDiscoveryTool so it can inspect the
+    cluster topology (daemon replica counts, etc.) before
+    deciding chaos parameters.
+    """
+
+    def __init__(
+        self,
+        llm: ChatModel,
+        krknctl_tool: KrknctlTool,
+        discovery_tool: ClusterDiscoveryTool | None = None,
+        rag_tools: Sequence[Any] | None = None,
+    ) -> None:
         system_prompt = (PROMPTS_DIR / "chaos_system.txt").read_text()
-        tools = [krknctl_tool]
+        tools: list[Any] = []
+        tools.append(krknctl_tool)
+        if discovery_tool:
+            tools.append(discovery_tool)
+        if rag_tools:
+            tools.extend(rag_tools)
 
         self.agent = ToolCallingAgent(
             llm=llm,

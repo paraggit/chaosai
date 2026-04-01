@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from beeai_framework.agents.tool_calling.agent import ToolCallingAgent
 from beeai_framework.agents.types import AgentMeta
@@ -19,18 +21,28 @@ PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
 
 class PlannerAgent:
-    """Interprets a user instruction + scenario plan and produces an ordered step plan."""
+    """Interprets a user instruction + scenario plan
+    and produces an ordered step plan."""
 
-    def __init__(self, llm: ChatModel, scenario_plan: dict | list) -> None:
+    def __init__(
+        self,
+        llm: ChatModel,
+        scenario_plan: dict | list,
+        rag_tools: Sequence[Any] | None = None,
+    ) -> None:
         system_prompt = (PROMPTS_DIR / "planner_system.txt").read_text()
+
+        tools: list[Any] = [ThinkTool()]
+        if rag_tools:
+            tools.extend(rag_tools)
 
         self.agent = ToolCallingAgent(
             llm=llm,
-            tools=[ThinkTool()],
+            tools=tools,
             meta=AgentMeta(
                 name="PlannerAgent",
                 description="Plans the chaos engineering workflow",
-                tools=[ThinkTool()],
+                tools=tools,
             ),
             templates={
                 "system": system_prompt_template(system_prompt),
@@ -38,7 +50,12 @@ class PlannerAgent:
         )
         self.scenario_plan = scenario_plan
 
-    async def plan(self, state: WorkflowState) -> WorkflowState:
+    _MAX_RETRIES = 3
+    _MIN_RESPONSE_LEN = 50
+
+    async def plan(
+        self, state: WorkflowState,
+    ) -> WorkflowState:
         scenario_names = []
         if isinstance(self.scenario_plan, dict):
             for key, val in self.scenario_plan.items():
@@ -47,57 +64,200 @@ class PlannerAgent:
 
         prompt = (
             f"User instruction: {state.instruction}\n\n"
-            f"Available krknctl chaos scenario names: {scenario_names}\n\n"
-            f"Full scenario catalog:\n{json.dumps(self.scenario_plan, indent=2)}\n\n"
-            "Produce the JSON step plan. Output ONLY the JSON array, nothing else."
+            f"Available krknctl chaos scenario names: "
+            f"{scenario_names}\n\n"
+            f"Full scenario catalog:\n"
+            f"{json.dumps(self.scenario_plan, indent=2)}"
+            f"\n\n"
+            "Produce the JSON plan object. "
+            "Output ONLY the JSON object, nothing else."
         )
 
-        logger.info("[PlannerAgent] Sending prompt to LLM (%d chars)", len(prompt))
-        logger.debug("[PlannerAgent] Prompt:\n%s", prompt)
+        logger.info(
+            "[PlannerAgent] Sending prompt to LLM "
+            "(%d chars)", len(prompt),
+        )
+        logger.debug(
+            "[PlannerAgent] Prompt:\n%s", prompt,
+        )
 
-        output = await self.agent.run(prompt)
-        raw_text = output.last_message.text
+        plan: dict = {}
 
-        logger.info("[PlannerAgent] Received LLM response (%d chars)", len(raw_text))
-        logger.info("[PlannerAgent] Raw LLM response:\n%s", raw_text[:3000])
+        for attempt in range(1, self._MAX_RETRIES + 1):
+            logger.info(
+                "[PlannerAgent] Attempt %d/%d",
+                attempt, self._MAX_RETRIES,
+            )
 
-        state.plan_steps = self._parse_plan(raw_text)
+            output = await self.agent.run(prompt)
+            raw_text = output.last_message.text
+
+            logger.info(
+                "[PlannerAgent] Received LLM response "
+                "(%d chars)", len(raw_text),
+            )
+            logger.info(
+                "[PlannerAgent] Raw LLM response:\n%s",
+                raw_text[:3000],
+            )
+
+            if len(raw_text) < self._MIN_RESPONSE_LEN:
+                logger.warning(
+                    "[PlannerAgent] Response too short "
+                    "(%d chars), retrying...",
+                    len(raw_text),
+                )
+                continue
+
+            plan = self._parse_structured_plan(
+                raw_text,
+            )
+            if plan:
+                break
+
+            logger.warning(
+                "[PlannerAgent] Parse returned empty, "
+                "retrying...",
+            )
+
+        state.structured_plan = plan
+        state.plan_steps = self._flatten_plan(plan)
         state.phase = Phase.EXECUTING
-        logger.info("[PlannerAgent] Parsed %d steps from plan", len(state.plan_steps))
-        if state.plan_steps:
-            logger.info("[PlannerAgent] Plan:\n%s", json.dumps(state.plan_steps, indent=2))
+        logger.info(
+            "[PlannerAgent] Plan phases: %s",
+            list(plan.keys()),
+        )
+        logger.info(
+            "[PlannerAgent] Plan (%d flat steps):\n%s",
+            len(state.plan_steps),
+            json.dumps(plan, indent=2)[:3000],
+        )
         return state
 
     @staticmethod
-    def _parse_plan(raw_text: str) -> list[dict]:
-        """Extract a JSON array from the LLM response, tolerating various wrappers."""
+    def _flatten_plan(plan: dict) -> list[dict]:
+        """Convert a 5-phase structured plan into a flat step list
+        with sequential ids and depends_on for the Supervisor."""
+        steps: list[dict] = []
+        step_id = 1
+        prev_id: int | None = None
+
+        phase_order = ["setup", "chaos", "test_ops", "post"]
+
+        for phase_name in phase_order:
+            phase_data = plan.get(phase_name)
+            if not phase_data:
+                continue
+
+            if phase_name == "chaos":
+                sc = phase_data.get("scenario_config", {})
+                if not sc:
+                    continue
+                step = {
+                    "id": step_id,
+                    "phase": phase_name,
+                    "tool": "krknctl",
+                    "action": f"Inject chaos: {sc.get('name', 'scenario')}",
+                    "params": {"scenario_config": sc},
+                    "depends_on": [prev_id] if prev_id else [],
+                }
+                steps.append(step)
+                prev_id = step_id
+                step_id += 1
+                continue
+
+            if not isinstance(phase_data, list):
+                continue
+
+            for raw_step in phase_data:
+                tool = raw_step.get("tool", "oc")
+                action = raw_step.get("action", "")
+                params = raw_step.get("params", {})
+
+                step = {
+                    "id": step_id,
+                    "phase": phase_name,
+                    "tool": tool,
+                    "action": action,
+                    "params": params,
+                    "depends_on": [prev_id] if prev_id else [],
+                }
+                steps.append(step)
+                prev_id = step_id
+                step_id += 1
+
+        return steps
+
+    @staticmethod
+    def _parse_structured_plan(raw_text: str) -> dict:
+        """Parse a 5-phase structured plan (JSON object)
+        from LLM output."""
         text = raw_text.strip()
 
         if "```" in text:
-            fenced = re.findall(r"```(?:json)?\s*([\s\S]*?)```", text)
-            for block in fenced:
+            blocks = re.findall(
+                r"```(?:json)?\s*([\s\S]*?)```", text,
+            )
+            for block in blocks:
                 block = block.strip()
-                if block.startswith("["):
+                if block.startswith("{"):
                     text = block
                     break
 
-        start = text.find("[")
-        end = text.rfind("]")
-        if start != -1 and end != -1 and end > start:
-            candidate = text[start : end + 1]
-            try:
-                parsed = json.loads(candidate)
-                if isinstance(parsed, list):
-                    return parsed
-            except json.JSONDecodeError as e:
-                logger.warning("[PlannerAgent] JSON parse failed: %s", e)
-                cleaned = re.sub(r",\s*([}\]])", r"\1", candidate)
-                try:
-                    parsed = json.loads(cleaned)
-                    if isinstance(parsed, list):
-                        return parsed
-                except json.JSONDecodeError:
-                    pass
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            logger.warning(
+                "[PlannerAgent] No JSON object found",
+            )
+            return {}
 
-        logger.warning("[PlannerAgent] Failed to parse plan. Raw response:\n%s", raw_text[:2000])
-        return []
+        candidate = text[start:end + 1]
+
+        phase_keys = ("setup", "chaos", "test_ops", "post")
+
+        for attempt_text in (
+            candidate,
+            PlannerAgent._repair_json(candidate),
+        ):
+            try:
+                parsed = json.loads(attempt_text)
+                if not isinstance(parsed, dict):
+                    continue
+                if any(k in parsed for k in phase_keys):
+                    return parsed
+                # Unwrap common LLM wrappers like
+                # {"PHASES": {...}} or {"plan": {...}}
+                for wrapper in parsed.values():
+                    if (
+                        isinstance(wrapper, dict)
+                        and any(
+                            k in wrapper for k in phase_keys
+                        )
+                    ):
+                        logger.info(
+                            "[PlannerAgent] Unwrapped "
+                            "nested plan object",
+                        )
+                        return wrapper
+            except json.JSONDecodeError:
+                continue
+
+        logger.warning(
+            "[PlannerAgent] Failed to parse "
+            "structured plan:\n%s",
+            raw_text[:2000],
+        )
+        return {}
+
+    @staticmethod
+    def _repair_json(text: str) -> str:
+        """Best-effort fix for common LLM JSON mistakes."""
+        text = re.sub(r",\s*([}\]])", r"\1", text)
+        text = re.sub(
+            r"([}\]])\s*\n(\s*\")", r"\1,\n\2", text,
+        )
+        text = re.sub(
+            r'"\s*\n(\s*")', r'",\n\1', text,
+        )
+        return text

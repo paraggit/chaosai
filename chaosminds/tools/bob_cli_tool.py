@@ -11,6 +11,8 @@ from beeai_framework.emitter import Emitter
 from beeai_framework.tools.tool import Tool, ToolRunOptions
 from beeai_framework.tools.types import StringToolOutput
 
+from chaosminds.cmd_split import UnsafeCommandError, split_command
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,7 +51,13 @@ class BobCliTool(Tool[BobCliInput, ToolRunOptions, StringToolOutput]):
     async def _run(
         self, input: BobCliInput, options: ToolRunOptions | None, context: RunContext
     ) -> StringToolOutput:
-        cmd = [self._binary_path, *input.command.split()]
+        try:
+            parts = split_command(input.command)
+        except UnsafeCommandError as exc:
+            return StringToolOutput(
+                f"[error] command rejected: {exc}",
+            )
+        cmd = [self._binary_path, *parts]
         env = {**os.environ, **input.extra_env}
         if self._kubeconfig:
             env["KUBECONFIG"] = self._kubeconfig

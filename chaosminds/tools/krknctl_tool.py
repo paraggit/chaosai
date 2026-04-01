@@ -41,6 +41,32 @@ class KrknctlInput(BaseModel):
     )
 
 
+def build_krknctl_graph(scenario_config: dict) -> dict:
+    """Wrap a single scenario node into the graph structure
+    that krknctl random run expects.
+
+    krknctl needs: root node (dummy-scenario) + scenario node
+    with depends_on pointing to the root key."""
+    root_key = "root_chaos"
+    name = scenario_config.get("name", "scenario")
+    scenario_key = f"{name}_chaos"
+
+    graph = {
+        root_key: {
+            "image": (
+                "quay.io/krkn-chaos/krkn-hub:dummy-scenario"
+            ),
+            "name": "dummy-scenario",
+            "env": {"END": "10", "EXIT_STATUS": "0"},
+        },
+        scenario_key: {
+            **scenario_config,
+            "depends_on": root_key,
+        },
+    }
+    return graph
+
+
 class KrknctlTool(Tool[KrknctlInput, ToolRunOptions, StringToolOutput]):
     """
     Wraps the real krknctl CLI:
@@ -49,12 +75,18 @@ class KrknctlTool(Tool[KrknctlInput, ToolRunOptions, StringToolOutput]):
 
     name = "krknctl_chaos_inject"
     description = (
-        "Injects chaos scenarios into the OpenShift cluster using krknctl. "
-        "Invocation: krknctl random run <scenario.json> --max-parallel=N --kubeconfig PATH. "
-        "Supports pod-kill, node-drain, network-partition and other Kraken scenarios."
+        "Injects chaos scenarios into the OpenShift cluster "
+        "using krknctl. "
+        "Invocation: krknctl random run <scenario.json> "
+        "--max-parallel=N --kubeconfig PATH. "
+        "Supports pod-kill, node-drain, network-partition "
+        "and other Kraken scenarios."
     )
 
-    def __init__(self, binary_path: str = "krknctl", kubeconfig: str = "") -> None:
+    def __init__(
+        self, binary_path: str = "krknctl",
+        kubeconfig: str = "",
+    ) -> None:
         super().__init__()
         self._binary_path = binary_path
         self._kubeconfig = kubeconfig
@@ -64,22 +96,35 @@ class KrknctlTool(Tool[KrknctlInput, ToolRunOptions, StringToolOutput]):
         return KrknctlInput
 
     async def _run(
-        self, input: KrknctlInput, options: ToolRunOptions | None, context: RunContext
+        self, input: KrknctlInput,
+        options: ToolRunOptions | None,
+        context: RunContext,
     ) -> StringToolOutput:
         tmp_file = None
         try:
             if input.scenario_file:
                 scenario_path = input.scenario_file
             elif input.scenario_config:
-                tmp_file = tempfile.NamedTemporaryFile(
-                    mode="w", suffix=".json", delete=False, prefix="krknctl_scenario_"
+                graph = build_krknctl_graph(
+                    input.scenario_config,
                 )
-                json.dump(input.scenario_config, tmp_file)
+                tmp_file = tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".json",
+                    delete=False,
+                    prefix="krknctl_scenario_",
+                )
+                json.dump(graph, tmp_file, indent=2)
                 tmp_file.close()
                 scenario_path = tmp_file.name
             else:
-                logger.warning("[krknctl] No scenario_file or scenario_config provided")
-                return StringToolOutput("[error] No scenario_file or scenario_config provided")
+                logger.warning(
+                    "[krknctl] No scenario_file or "
+                    "scenario_config provided",
+                )
+                return StringToolOutput(
+                    "[error] No scenario_file or "
+                    "scenario_config provided",
+                )
 
             cmd = [
                 self._binary_path, "random", "run",
@@ -94,7 +139,10 @@ class KrknctlTool(Tool[KrknctlInput, ToolRunOptions, StringToolOutput]):
             if input.scenario_config:
                 logger.info("[krknctl] scenario_config:\n%s", json.dumps(input.scenario_config, indent=2))
 
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=900,
+            )
 
             output_parts = []
             if result.stdout:

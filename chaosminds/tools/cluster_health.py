@@ -216,8 +216,11 @@ class ClusterHealthTool(Tool[HealthCheckInput, ToolRunOptions, StringToolOutput]
         if isinstance(raw, dict):
             entries = raw if isinstance(raw, list) else []
             return {"count": len(entries), "crashes": entries}
-        lines = [l.strip() for l in str(raw).splitlines() if l.strip()]
-        crash_ids = [l for l in lines if not l.startswith("ID") and not l.startswith("--")]
+        lines = [ln.strip() for ln in str(raw).splitlines() if ln.strip()]
+        crash_ids = [
+            ln for ln in lines
+            if not ln.startswith("ID") and not ln.startswith("--")
+        ]
         return {"count": len(crash_ids), "crashes": crash_ids[:10]}
 
     # ── Rules evaluation ──

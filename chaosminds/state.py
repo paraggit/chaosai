@@ -32,12 +32,14 @@ class WorkflowState:
     phase: Phase = Phase.PLANNING
 
     plan_steps: list[dict] = field(default_factory=list)
+    structured_plan: dict = field(default_factory=dict)
     chaos_scenarios: list[dict] = field(default_factory=list)
 
     execution_log: list[StepResult] = field(default_factory=list)
     cluster_health: dict = field(default_factory=dict)
     health_timeline: list[dict] = field(default_factory=list)
 
+    analysis: dict = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     final_report: str = ""
 

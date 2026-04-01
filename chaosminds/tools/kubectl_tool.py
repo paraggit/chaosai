@@ -11,6 +11,10 @@ from beeai_framework.emitter import Emitter
 from beeai_framework.tools.tool import Tool, ToolRunOptions
 from beeai_framework.tools.types import StringToolOutput
 
+from chaosminds.cmd_split import UnsafeCommandError, split_command
+from chaosminds.iteration_placeholders import expand_iteration_placeholders
+from chaosminds.oc_cmd_guard import oc_get_missing_resource
+
 logger = logging.getLogger(__name__)
 
 
@@ -20,6 +24,7 @@ class OcInput(BaseModel):
         description=(
             "oc sub-command and arguments to run, e.g. "
             "'get pods -n openshift-storage -o json' or 'apply -f -'. "
+            "Never use bare 'get' without a resource type. "
             "Do NOT include the 'oc' binary name itself."
         ),
     )
@@ -54,14 +59,28 @@ class OcTool(Tool[OcInput, ToolRunOptions, StringToolOutput]):
     async def _run(
         self, input: OcInput, options: ToolRunOptions | None, context: RunContext
     ) -> StringToolOutput:
-        cmd = [self._binary_path, *input.command.split()]
+        command = expand_iteration_placeholders(input.command, idx=1)
+        yaml_in = expand_iteration_placeholders(input.yaml, idx=1) if input.yaml else ""
+        try:
+            parts = split_command(command)
+        except UnsafeCommandError as exc:
+            return StringToolOutput(
+                f"[error] command rejected: {exc}",
+            )
+        if oc_get_missing_resource(parts):
+            return StringToolOutput(
+                "[error] `oc get` requires a resource type (e.g. pods, pvc, "
+                "storagecluster) and optional name, or `-f <file>`. "
+                "Example: get pods -n openshift-storage",
+            )
+        cmd = [self._binary_path, *parts]
         env = None
         if self._kubeconfig:
             env = {**os.environ, "KUBECONFIG": self._kubeconfig}
 
-        stdin_data = input.yaml if input.yaml else None
+        stdin_data = yaml_in if yaml_in else None
 
-        logger.info("[oc] command: %s %s", self._binary_path, input.command)
+        logger.info("[oc] command: %s %s", self._binary_path, command)
         if stdin_data:
             logger.info("[oc] stdin yaml:\n%s", stdin_data)
 

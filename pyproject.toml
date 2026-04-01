@@ -7,13 +7,50 @@ requires-python = ">=3.12"
 dependencies = [
     "aiofiles>=24.1.0",
     "beeai-framework>=0.1.79",
+    "chromadb>=0.4.0",
+    "gitpython>=3.1.0",
+    "langchain>=0.2.0",
+    "langchain-chroma>=1.1.0",
+    "langchain-community>=0.2.0",
+    "langchain-core>=0.2.0",
+    "langchain-ollama>=1.0.1",
     "pydantic>=2.12.5",
     "python-dotenv>=1.2.2",
+    "rich>=13.0.0",
 ]
 
 [project.scripts]
 chaosminds = "chaosminds.main:main"
+chaosminds-rag = "chaosminds.rag.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["chaosminds", "tests"]
+extend-exclude = ["chaosminds/rag"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+packages = ["chaosminds"]
+warn_return_any = true
+warn_unused_ignores = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

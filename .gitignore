@@ -4,6 +4,7 @@ __pycache__/
 build/
 dist/
 wheels/
+.bob/
 *.egg-info
 
 # Virtual environments
@@ -14,6 +15,22 @@ wheels/
 
 # Run logs
 logs/
+
+# Generated scripts
+scripts/
+
+# Must-gather logs
+must-gather/
+
+# Analysis reports
+analysis/
+
+# krknctl runtime artifacts
+krknctl-*
+random-graph-*.json
+
+# RAG data (cloned repos, ChromaDB, sync state)
+data/
 
 # mypy
 .mypy_cache/
