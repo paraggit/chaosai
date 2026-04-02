@@ -75,8 +75,11 @@ class Supervisor:
             self.llm, self.bob_tool, self.oc_tool, rag_tools=rag_tools,
         )
         self.chaos_agent = ChaosAgent(
-            self.llm, self.krknctl_tool, self.discovery_tool,
+            self.llm,
+            self.krknctl_tool,
+            self.discovery_tool,
             rag_tools=rag_tools,
+            chaos_max_parallel=config.chaos_max_parallel,
         )
         self.wait_agent = WaitAgent(
             self.llm,

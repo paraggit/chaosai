@@ -67,6 +67,65 @@ def build_krknctl_graph(scenario_config: dict) -> dict:
     return graph
 
 
+def run_krknctl_from_scenario_config(
+    binary_path: str,
+    kubeconfig: str,
+    scenario_config: dict,
+    max_parallel: int = 2,
+) -> tuple[int, str]:
+    """Run ``krknctl random run`` with a graph from ``scenario_config``.
+
+    Used when the Chaos LLM path fails (e.g. chat model error). Returns
+    ``(exit_code, combined stdout/stderr)``.
+    """
+    if not scenario_config:
+        return 1, "[error] empty scenario_config"
+
+    tmp_path: str | None = None
+    try:
+        graph = build_krknctl_graph(scenario_config)
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".json",
+            delete=False,
+            prefix="krknctl_direct_",
+        )
+        json.dump(graph, tmp, indent=2)
+        tmp.close()
+        tmp_path = tmp.name
+
+        cmd = [
+            binary_path,
+            "random",
+            "run",
+            tmp_path,
+            f"--max-parallel={max_parallel}",
+        ]
+        if kubeconfig:
+            cmd.append(f"--kubeconfig={kubeconfig}")
+
+        logger.info("[krknctl-direct] command: %s", " ".join(cmd))
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+        parts: list[str] = []
+        if result.stdout:
+            parts.append(result.stdout)
+        if result.stderr:
+            parts.append(f"[stderr] {result.stderr}")
+        combined = "\n".join(parts) or "(no output)"
+        return result.returncode, combined
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
 class KrknctlTool(Tool[KrknctlInput, ToolRunOptions, StringToolOutput]):
     """
     Wraps the real krknctl CLI:
@@ -90,6 +149,14 @@ class KrknctlTool(Tool[KrknctlInput, ToolRunOptions, StringToolOutput]):
         super().__init__()
         self._binary_path = binary_path
         self._kubeconfig = kubeconfig
+
+    @property
+    def binary_path(self) -> str:
+        return self._binary_path
+
+    @property
+    def kubeconfig(self) -> str:
+        return self._kubeconfig
 
     @property
     def input_schema(self) -> type[KrknctlInput]:
