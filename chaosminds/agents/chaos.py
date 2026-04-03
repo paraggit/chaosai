@@ -134,7 +134,12 @@ class ChaosAgent:
             output = await self.agent.run(prompt)
             result_text = output.last_message.text
 
-            logger.info("[ChaosAgent] LLM response (%d chars):\n%s", len(result_text), result_text[:2000])
+            logger.info(
+                "[ChaosAgent] LLM response (%d chars):\n%s",
+                len(result_text),
+                result_text[:2000],
+            )
+            logger.debug("[ChaosAgent] LLM response (full):\n%s", result_text)
 
             state.log_step(
                 step_id=step["id"],

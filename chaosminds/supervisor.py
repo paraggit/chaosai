@@ -17,6 +17,7 @@ from chaosminds.agents.monitor import ClusterMonitorAgent
 from chaosminds.agents.planner import PlannerAgent
 from chaosminds.agents.waiter import WaitAgent
 from chaosminds.config import AppConfig
+from chaosminds.logging_utils import log_step_params
 from chaosminds.rag.factory import build_rag_tools
 from chaosminds.state import Phase, WorkflowState
 from chaosminds.tools.bob_cli_tool import BobCliTool
@@ -72,7 +73,11 @@ class Supervisor:
             self.llm, config.scenario_plan, rag_tools=rag_tools,
         )
         self.executor = ExecutorAgent(
-            self.llm, self.bob_tool, self.oc_tool, rag_tools=rag_tools,
+            self.llm,
+            self.bob_tool,
+            self.oc_tool,
+            rag_tools=rag_tools,
+            max_iterations=config.executor_max_iterations,
         )
         self.chaos_agent = ChaosAgent(
             self.llm,
@@ -142,9 +147,10 @@ class Supervisor:
             state.final_report = state.summary()
             return state
 
-        logger.info("[Supervisor] Plan: %d steps", len(state.plan_steps))
-        for step in state.plan_steps:
-            logger.info("[Supervisor]   Step %s: [%s] %s", step.get("id"), step.get("tool"), step.get("action"))
+        logger.info(
+            "[Supervisor] Execution: %d step(s)",
+            len(state.plan_steps),
+        )
 
         # ── Phase 2: Execute steps in dependency order ──
         sorted_steps = self._topological_sort(state.plan_steps)
@@ -156,8 +162,19 @@ class Supervisor:
             action = step.get("action", "")
 
             logger.info("-" * 60)
-            logger.info("[Supervisor] Step %s/%s — id=%s tool=%s action=%s", idx, total, step_id, tool, action)
-            logger.info("[Supervisor] Step params: %s", json.dumps(step.get("params", {}), indent=2))
+            logger.info(
+                "[Supervisor] Step %s/%s — id=%s tool=%s action=%s",
+                idx,
+                total,
+                step_id,
+                tool,
+                action,
+            )
+            log_step_params(
+                logger,
+                "[Supervisor] Step params",
+                step.get("params", {}),
+            )
 
             # Pre-step health check
             old_phase = state.phase

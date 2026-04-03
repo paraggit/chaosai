@@ -5,6 +5,7 @@ import logging
 import os
 import subprocess
 import tempfile
+import time
 
 from pydantic import BaseModel, Field
 
@@ -13,7 +14,85 @@ from beeai_framework.emitter import Emitter
 from beeai_framework.tools.tool import Tool, ToolRunOptions
 from beeai_framework.tools.types import StringToolOutput
 
+from chaosminds.logging_utils import short_json
+
 logger = logging.getLogger(__name__)
+
+_DEFAULT_KRKN_RETRIES = 3
+_DEFAULT_KRKN_BACKOFF_S = 5.0
+
+
+def _krkn_combined_output(result: subprocess.CompletedProcess[str]) -> str:
+    parts: list[str] = []
+    if result.stdout:
+        parts.append(result.stdout)
+    if result.stderr:
+        parts.append(f"[stderr] {result.stderr}")
+    return "\n".join(parts) or "(no output)"
+
+
+def _krkn_failure_hint(combined: str) -> str:
+    """Extra context when krknctl fails on registry/version (known flaky upstream)."""
+    low = combined.lower()
+    if not any(
+        x in low
+        for x in (
+            "no release found",
+            "failed to fetch krknctl version",
+            "panic:",
+            "nil pointer",
+            "sigsegv",
+            "failed to retrieve tags",
+            "failed to retrieve scenario",
+        )
+    ):
+        return ""
+    return (
+        "\n\n[chaosminds] krknctl talks to Quay (scenario metadata) and GitHub "
+        "(version). Failures are retried automatically. If this persists: "
+        "allow outbound HTTPS to quay.io and api.github.com, check VPN/firewall, "
+        "and upgrade krknctl (older builds can panic when HTTP errors are ignored)."
+    )
+
+
+def run_krknctl_random_run(
+    cmd: list[str],
+    *,
+    retries: int | None = None,
+    backoff_seconds: float = _DEFAULT_KRKN_BACKOFF_S,
+    timeout: int = 900,
+) -> tuple[int, str]:
+    """Run ``krknctl random run ...`` with retries for transient network/API errors."""
+    n = retries if retries is not None else int(
+        os.getenv("KRKNCTL_RETRIES", str(_DEFAULT_KRKN_RETRIES)),
+    )
+    n = max(1, n)
+    env = os.environ.copy()
+    last_rc = 1
+    last_out = ""
+    for attempt in range(1, n + 1):
+        logger.info("[krknctl] run attempt %d/%d", attempt, n)
+        logger.debug("[krknctl] command: %s", " ".join(cmd))
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+        last_rc = result.returncode
+        last_out = _krkn_combined_output(result)
+        if last_rc == 0:
+            return 0, last_out
+        if attempt < n:
+            logger.warning(
+                "[krknctl] attempt %d failed (exit=%d), retry in %ss",
+                attempt,
+                last_rc,
+                backoff_seconds,
+            )
+            time.sleep(backoff_seconds)
+    return last_rc, last_out + _krkn_failure_hint(last_out)
 
 
 class KrknctlInput(BaseModel):
@@ -104,20 +183,8 @@ def run_krknctl_from_scenario_config(
         if kubeconfig:
             cmd.append(f"--kubeconfig={kubeconfig}")
 
-        logger.info("[krknctl-direct] command: %s", " ".join(cmd))
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=900,
-        )
-        parts: list[str] = []
-        if result.stdout:
-            parts.append(result.stdout)
-        if result.stderr:
-            parts.append(f"[stderr] {result.stderr}")
-        combined = "\n".join(parts) or "(no output)"
-        return result.returncode, combined
+        rc, combined = run_krknctl_random_run(cmd, timeout=900)
+        return rc, combined
     finally:
         if tmp_path:
             try:
@@ -202,29 +269,29 @@ class KrknctlTool(Tool[KrknctlInput, ToolRunOptions, StringToolOutput]):
                 cmd.append(f"--kubeconfig={self._kubeconfig}")
             cmd.extend(input.extra_args)
 
-            logger.info("[krknctl] command: %s", " ".join(cmd))
-            if input.scenario_config:
-                logger.info("[krknctl] scenario_config:\n%s", json.dumps(input.scenario_config, indent=2))
-
-            result = subprocess.run(
-                cmd, capture_output=True, text=True,
-                timeout=900,
+            sc_label = (
+                input.scenario_config.get("name", "?")
+                if input.scenario_config
+                else scenario_path
             )
+            logger.info(
+                "[krknctl] scenario=%s max_parallel=%s",
+                sc_label,
+                input.max_parallel,
+            )
+            logger.debug("[krknctl] command: %s", " ".join(cmd))
+            if input.scenario_config:
+                logger.debug(
+                    "[krknctl] scenario_config:\n%s",
+                    json.dumps(input.scenario_config, indent=2),
+                )
 
-            output_parts = []
-            if result.stdout:
-                output_parts.append(result.stdout)
-            if result.stderr:
-                output_parts.append(f"[stderr] {result.stderr}")
-            if result.returncode != 0:
-                output_parts.append(f"[exit_code={result.returncode}]")
+            rc, combined = run_krknctl_random_run(cmd, timeout=900)
+            if rc != 0:
+                combined = f"{combined}\n[exit_code={rc}]"
 
-            combined = "\n".join(output_parts) or "(no output)"
-
-            logger.info("[krknctl] exit_code=%d", result.returncode)
-            logger.info("[krknctl] stdout:\n%s", result.stdout[:3000] if result.stdout else "(empty)")
-            if result.stderr:
-                logger.info("[krknctl] stderr:\n%s", result.stderr[:2000])
+            logger.info("[krknctl] exit=%d %s", rc, short_json(combined, 400))
+            logger.debug("[krknctl] output full:\n%s", combined)
 
             return StringToolOutput(combined)
         finally:
@@ -276,7 +343,7 @@ class KrknctlListTool(Tool[KrknctlListInput, ToolRunOptions, StringToolOutput]):
         sub = input.subcommand if input.subcommand in ("running", "available") else "running"
         cmd = [self._binary_path, "list", sub, *input.extra_args]
 
-        logger.info("[krknctl-list] command: %s", " ".join(cmd))
+        logger.debug("[krknctl-list] command: %s", " ".join(cmd))
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
 
@@ -288,7 +355,13 @@ class KrknctlListTool(Tool[KrknctlListInput, ToolRunOptions, StringToolOutput]):
 
         combined = "\n".join(output_parts) or "(no output)"
 
-        logger.info("[krknctl-list] output:\n%s", combined[:2000])
+        logger.info(
+            "[krknctl-list] sub=%s exit=%d %s",
+            sub,
+            result.returncode,
+            short_json(combined, 400),
+        )
+        logger.debug("[krknctl-list] output full:\n%s", combined)
 
         return StringToolOutput(combined)
 

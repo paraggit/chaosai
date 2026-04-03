@@ -36,12 +36,15 @@ class ExecutorAgent:
         bob_tool: BobCliTool,
         oc_tool: OcTool,
         rag_tools: Sequence[Any] | None = None,
+        *,
+        max_iterations: int = 25,
     ) -> None:
         system_prompt = (PROMPTS_DIR / "executor_system.txt").read_text()
         tools: list[Any] = [bob_tool, oc_tool, OcValidationTool()]
         if rag_tools:
             tools.extend(rag_tools)
 
+        self._max_iterations = max(1, max_iterations)
         self.agent = ToolCallingAgent(
             llm=llm,
             tools=tools,
@@ -72,10 +75,18 @@ class ExecutorAgent:
         logger.debug("[ExecutorAgent] Prompt:\n%s", prompt)
 
         try:
-            output = await self.agent.run(prompt)
+            output = await self.agent.run(
+                prompt,
+                max_iterations=self._max_iterations,
+            )
             result_text = output.last_message.text
 
-            logger.info("[ExecutorAgent] LLM response (%d chars):\n%s", len(result_text), result_text[:2000])
+            logger.info(
+                "[ExecutorAgent] LLM response (%d chars):\n%s",
+                len(result_text),
+                result_text[:2000],
+            )
+            logger.debug("[ExecutorAgent] LLM response (full):\n%s", result_text)
 
             state.log_step(
                 step_id=step["id"],

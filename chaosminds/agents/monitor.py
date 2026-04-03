@@ -58,7 +58,12 @@ class ClusterMonitorAgent:
             output = await self.agent.run(prompt)
             raw = output.last_message.text
 
-            logger.info("[MonitorAgent] LLM response (%d chars):\n%s", len(raw), raw[:2000])
+            logger.info(
+                "[MonitorAgent] LLM response (%d chars):\n%s",
+                len(raw),
+                raw[:2000],
+            )
+            logger.debug("[MonitorAgent] LLM response (full):\n%s", raw)
 
             try:
                 health_data = json.loads(raw)

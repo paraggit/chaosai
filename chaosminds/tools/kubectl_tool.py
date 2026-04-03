@@ -13,6 +13,7 @@ from beeai_framework.tools.types import StringToolOutput
 
 from chaosminds.cmd_split import UnsafeCommandError, split_command
 from chaosminds.iteration_placeholders import expand_iteration_placeholders
+from chaosminds.logging_utils import short_json
 from chaosminds.oc_cmd_guard import oc_get_missing_resource
 
 logger = logging.getLogger(__name__)
@@ -80,9 +81,9 @@ class OcTool(Tool[OcInput, ToolRunOptions, StringToolOutput]):
 
         stdin_data = yaml_in if yaml_in else None
 
-        logger.info("[oc] command: %s %s", self._binary_path, command)
+        logger.info("[oc] %s", command)
         if stdin_data:
-            logger.info("[oc] stdin yaml:\n%s", stdin_data)
+            logger.debug("[oc] stdin yaml:\n%s", stdin_data)
 
         result = subprocess.run(
             cmd,
@@ -103,10 +104,13 @@ class OcTool(Tool[OcInput, ToolRunOptions, StringToolOutput]):
 
         combined = "\n".join(output_parts) or "(no output)"
 
-        logger.info("[oc] exit_code=%d", result.returncode)
-        logger.info("[oc] stdout:\n%s", result.stdout[:2000] if result.stdout else "(empty)")
-        if result.stderr:
-            logger.info("[oc] stderr:\n%s", result.stderr[:2000])
+        logger.info(
+            "[oc] exit=%d %s",
+            result.returncode,
+            short_json(combined, 500),
+        )
+        logger.debug("[oc] stdout:\n%s", result.stdout or "")
+        logger.debug("[oc] stderr:\n%s", result.stderr or "")
 
         return StringToolOutput(combined)
 

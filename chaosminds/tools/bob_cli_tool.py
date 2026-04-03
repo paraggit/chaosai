@@ -12,6 +12,7 @@ from beeai_framework.tools.tool import Tool, ToolRunOptions
 from beeai_framework.tools.types import StringToolOutput
 
 from chaosminds.cmd_split import UnsafeCommandError, split_command
+from chaosminds.logging_utils import short_json
 
 logger = logging.getLogger(__name__)
 
@@ -62,9 +63,9 @@ class BobCliTool(Tool[BobCliInput, ToolRunOptions, StringToolOutput]):
         if self._kubeconfig:
             env["KUBECONFIG"] = self._kubeconfig
 
-        logger.info("[bob] command: %s %s", self._binary_path, input.command)
+        logger.info("[bob] %s", input.command)
         if input.extra_env:
-            logger.info("[bob] extra_env: %s", input.extra_env)
+            logger.debug("[bob] extra_env: %s", input.extra_env)
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=env)
 
@@ -78,10 +79,13 @@ class BobCliTool(Tool[BobCliInput, ToolRunOptions, StringToolOutput]):
 
         combined = "\n".join(output_parts) or "(no output)"
 
-        logger.info("[bob] exit_code=%d", result.returncode)
-        logger.info("[bob] stdout:\n%s", result.stdout[:2000] if result.stdout else "(empty)")
-        if result.stderr:
-            logger.info("[bob] stderr:\n%s", result.stderr[:2000])
+        logger.info(
+            "[bob] exit=%d %s",
+            result.returncode,
+            short_json(combined, 500),
+        )
+        logger.debug("[bob] stdout:\n%s", result.stdout or "")
+        logger.debug("[bob] stderr:\n%s", result.stderr or "")
 
         return StringToolOutput(combined)
 

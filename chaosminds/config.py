@@ -52,6 +52,8 @@ class AppConfig(BaseModel):
     chaos_poll_interval: int = 15
     chaos_settle_time: int = 30
     chaos_max_parallel: int = 4
+    # ToolCallingAgent default is 10; PVC/YAML steps need RAG + validate + several oc calls + final_answer
+    executor_max_iterations: int = 25
     loop_count: int = 10
     collect_must_gather: bool = False
     log_level: str = "INFO"
@@ -91,6 +93,7 @@ class AppConfig(BaseModel):
             "chaos_poll_interval": int(os.getenv("CHAOS_POLL_INTERVAL", "15")),
             "chaos_settle_time": int(os.getenv("CHAOS_SETTLE_TIME", "30")),
             "chaos_max_parallel": int(os.getenv("CHAOS_MAX_PARALLEL", "4")),
+            "executor_max_iterations": int(os.getenv("EXECUTOR_MAX_ITERATIONS", "25")),
             "loop_count": int(os.getenv("LOOP_COUNT", "10")),
             "collect_must_gather": os.getenv("COLLECT_MUST_GATHER", "false").lower() in ("true", "1", "yes"),
             "log_level": os.getenv("LOG_LEVEL", "INFO"),

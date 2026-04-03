@@ -13,6 +13,8 @@ from beeai_framework.backend.chat import ChatModel
 from beeai_framework.tools.think import ThinkTool
 
 from chaosminds.agents._prompts import system_prompt_template
+from chaosminds.chaos_plan import normalize_chaos_scenarios
+from chaosminds.logging_utils import log_plan
 from chaosminds.state import Phase, WorkflowState
 
 logger = logging.getLogger(__name__)
@@ -123,15 +125,7 @@ class PlannerAgent:
         state.structured_plan = plan
         state.plan_steps = self._flatten_plan(plan)
         state.phase = Phase.EXECUTING
-        logger.info(
-            "[PlannerAgent] Plan phases: %s",
-            list(plan.keys()),
-        )
-        logger.info(
-            "[PlannerAgent] Plan (%d flat steps):\n%s",
-            len(state.plan_steps),
-            json.dumps(plan, indent=2)[:3000],
-        )
+        log_plan(logger, "[PlannerAgent] Plan", plan, state.plan_steps)
         return state
 
     @staticmethod
@@ -150,20 +144,22 @@ class PlannerAgent:
                 continue
 
             if phase_name == "chaos":
-                sc = phase_data.get("scenario_config", {})
-                if not sc:
+                if not isinstance(phase_data, dict):
                     continue
-                step = {
-                    "id": step_id,
-                    "phase": phase_name,
-                    "tool": "krknctl",
-                    "action": f"Inject chaos: {sc.get('name', 'scenario')}",
-                    "params": {"scenario_config": sc},
-                    "depends_on": [prev_id] if prev_id else [],
-                }
-                steps.append(step)
-                prev_id = step_id
-                step_id += 1
+                for sc in normalize_chaos_scenarios(phase_data):
+                    step = {
+                        "id": step_id,
+                        "phase": phase_name,
+                        "tool": "krknctl",
+                        "action": (
+                            f"Inject chaos: {sc.get('name', 'scenario')}"
+                        ),
+                        "params": {"scenario_config": sc},
+                        "depends_on": [prev_id] if prev_id else [],
+                    }
+                    steps.append(step)
+                    prev_id = step_id
+                    step_id += 1
                 continue
 
             if not isinstance(phase_data, list):

@@ -15,6 +15,7 @@ import os
 import re
 from datetime import datetime, timezone
 
+from chaosminds.chaos_plan import normalize_chaos_scenarios
 from chaosminds.config import AppConfig
 
 logger = logging.getLogger(__name__)
@@ -27,15 +28,22 @@ _POD_SCENARIO_VARIANTS = [
 ]
 
 
-def _build_chaos_graph(sc: dict) -> tuple[dict, str]:
-    """Build a krknctl random-run graph from a scenario config.
+def _build_chaos_graph_for_script(
+    scenarios: list[dict],
+) -> tuple[dict, str]:
+    """Build one krknctl graph: root dummy + scenario nodes.
 
-    For pod-scenarios the planner's single scenario_config is fanned
-    out into multiple variant nodes (one per ODF component) so that
-    krknctl runs them concurrently.  Other scenario types produce a
-    single chaos node.  Returns (graph_dict, chaos_prefix).
+    Each entry in ``scenarios`` is a krkn hub scenario dict. For
+    ``pod-scenarios`` only, fan out ``_POD_SCENARIO_VARIANTS`` so OSD/MON/
+    MGR/MDS run concurrently. Multiple *different* scenario types share one
+    root and run in parallel under ``krknctl random run``.
+
+    Returns ``(graph_dict, wait_pattern)`` for ``wait_chaos_active`` (grep on
+    ``krknctl list running``). Multiple scenario types use pattern
+    ``krknctl-``; a single scenario uses ``krknctl-<name>_chaos_`` as before.
     """
-    name = sc.get("name", "scenario")
+    if not scenarios:
+        return {}, "krknctl-"
 
     graph: dict = {
         "root_chaos": {
@@ -45,23 +53,31 @@ def _build_chaos_graph(sc: dict) -> tuple[dict, str]:
         },
     }
 
-    variants = (
-        _POD_SCENARIO_VARIANTS if name == "pod-scenarios" else [{}]
-    )
+    for sc in scenarios:
+        name = sc.get("name", "scenario")
+        variants = (
+            _POD_SCENARIO_VARIANTS if name == "pod-scenarios" else [{}]
+        )
+        for variant in variants:
+            suffix = os.urandom(4).hex()
+            node_key = f"{name}_chaos_{suffix}"
+            while node_key in graph:
+                suffix = os.urandom(4).hex()
+                node_key = f"{name}_chaos_{suffix}"
+            node = {k: v for k, v in sc.items()}
+            if variant:
+                merged_env = dict(node.get("env", {}))
+                merged_env.update(variant)
+                node["env"] = merged_env
+            node["depends_on"] = "root_chaos"
+            graph[node_key] = node
 
-    for variant in variants:
-        suffix = os.urandom(2).hex()
-        node_key = f"{name}_chaos_{suffix}"
-        node = {k: v for k, v in sc.items()}
-        if variant:
-            merged_env = dict(node.get("env", {}))
-            merged_env.update(variant)
-            node["env"] = merged_env
-        node["depends_on"] = "root_chaos"
-        graph[node_key] = node
-
-    chaos_prefix = f"{name}_chaos_"
-    return graph, chaos_prefix
+    if len(scenarios) == 1:
+        first = scenarios[0].get("name", "scenario")
+        wait_pattern = f"krknctl-{first}_chaos_"
+    else:
+        wait_pattern = "krknctl-"
+    return graph, wait_pattern
 
 _HEADER = """\
 #!/usr/bin/env bash
@@ -408,8 +424,10 @@ def generate_script(
     )
 
     chaos = plan.get("chaos", {})
-    sc = chaos.get("scenario_config", {})
-    if sc:
+    scenarios = normalize_chaos_scenarios(
+        chaos if isinstance(chaos, dict) else {},
+    )
+    if scenarios:
         body.append(
             'log "[chaos] Cleaning stale chaos '
             'containers from previous runs..."',
@@ -417,13 +435,16 @@ def generate_script(
         body.append("stop_chaos")
         body.append("")
 
-        graph, chaos_prefix = _build_chaos_graph(sc)
+        graph, wait_pattern = _build_chaos_graph_for_script(scenarios)
         graph_json = json.dumps(graph, indent=2)
 
         num_nodes = len(graph) - 1
+        names = ", ".join(
+            s.get("name", "?") for s in scenarios
+        )
         body.append(
-            f'log "[chaos] Graph: {num_nodes} variant(s) '
-            f'of {sc.get("name", "scenario")}"',
+            f'log "[chaos] Graph: {num_nodes} node(s); '
+            f'scenario(s): {names}"',
         )
         body.append(
             "CHAOS_TMP=$(mktemp /tmp/krknctl_XXXXXX)",
@@ -465,7 +486,7 @@ def generate_script(
             "(not the dummy)",
         )
         body.append(
-            f'wait_chaos_active "krknctl-{chaos_prefix}" '
+            f'wait_chaos_active "{wait_pattern}" '
             "|| "
             'log "[chaos] Proceeding despite '
             'no confirmation"',

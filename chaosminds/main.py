@@ -20,7 +20,13 @@ SCRIPTS_DIR = Path("scripts")
 
 
 def setup_logging(level: str) -> Path:
-    """Configure dual logging: console (compact) + per-run log file (verbose)."""
+    """Configure dual logging.
+
+    - **Console** (stderr): level from ``level`` (typically INFO). Use
+      ``--verbose`` or ``LOG_LEVEL=DEBUG`` for full console detail.
+    - **Log file** (``logs/run_*.log``): always **DEBUG** so full plans,
+      prompts, and tool I/O remain available without cluttering the console.
+    """
     LOGS_DIR.mkdir(exist_ok=True)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -92,6 +98,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             " (for review/editing)."
         ),
     )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help=(
+            "Console: show DEBUG (full detail). "
+            "Without this, console is INFO; log file always has DEBUG."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -111,10 +126,15 @@ def main(argv: list[str] | None = None) -> None:
         chaos_max_parallel=args.chaos_max_parallel,
     )
 
-    log_file = setup_logging(config.log_level)
+    log_level = "DEBUG" if args.verbose else config.log_level
+    log_file = setup_logging(log_level)
     logger = logging.getLogger("chaosminds")
 
-    logger.info("Log file: %s", log_file.resolve())
+    logger.info(
+        "Logging: stderr=%s  |  file=%s (file always DEBUG)",
+        log_level.upper(),
+        log_file.resolve(),
+    )
 
     if not config.kubeconfig:
         logger.error("KUBECONFIG not set. Provide via --kubeconfig or .env file.")
@@ -196,9 +216,7 @@ def _script_mode(
         logger.error("Planner produced an empty/invalid plan")
         sys.exit(1)
 
-    logger.info(
-        "Plan:\n%s", json.dumps(plan, indent=2)[:3000],
-    )
+    # Plan summary + full JSON: see PlannerAgent (INFO summary, DEBUG detail)
 
     # ── EXECUTOR: generate script ──
     logger.info("=" * 60)
@@ -821,6 +839,8 @@ def _script_only_mode(
     if not plan:
         logger.error("Planner produced an empty plan")
         sys.exit(1)
+
+    # Plan summary + full JSON: see PlannerAgent (INFO summary, DEBUG detail)
 
     script = generate_script(plan, config, instruction)
 

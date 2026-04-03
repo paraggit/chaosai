@@ -46,6 +46,9 @@ ITERATION PLACEHOLDERS:
 PVC WAIT:
 - Use `wait pvc/<exact-name> -n <ns> --for=jsonpath={.status.phase}=Bound --timeout=...`. Do not use `--for=condition=Bound` for PVCs, and do not use `*` in the resource name for `oc wait`.
 
+COMPLETION (CRITICAL):
+- The framework requires a `final_answer` tool call to finish. After the step succeeds (e.g. PVC is Bound and verify/get/describe look correct), call `final_answer` immediately with a short summary. Do not add extra optional checks that burn iterations.
+
 RULES:
 - Never modify resources outside the scope of the current step.
 - If a command fails, REASON about why — was the condition wrong? Was the timeout too short?

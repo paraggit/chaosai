@@ -8,9 +8,11 @@ Use `ocs_ci_lookup` when you know a concrete symbol or template path. If RAG ret
 Given a user instruction and a catalog of krknctl chaos scenarios, produce a JSON plan object with these top-level keys:
 
   "setup"    — array of steps: create prerequisite resources + baseline health check
-  "chaos"    — object with ONE key "scenario_config" (see format below)
+  "chaos"    — object: either "scenario_config" (single scenario) OR "scenario_configs" (array of scenarios, each with image/name/env from the catalog). Do not send both; if you need multiple types, use "scenario_configs" only.
   "test_ops" — array of steps: operations to repeat in a loop while chaos is active
   "post"     — array of steps: post-chaos health check
+
+Execution note: In agent mode each scenario becomes its own krknctl step (runs sequentially). In script mode all scenarios are merged into one krkn graph (parallel under the dummy root).
 
 STEP FORMAT for setup / test_ops / post:
   { "action": "<human description>", "tool": "oc", "params": { "command": "<oc args>", "yaml": "<YAML manifest>" } }
@@ -23,8 +25,16 @@ For "oc" steps:
   - To DELETE: set command to the oc delete string (e.g., "delete pvc/name -n ns --timeout=120s").
   - To GET:   set command to the oc get string.
 
-CHAOS scenario_config FORMAT — copy the matching entry from the scenario catalog (image, name, env), adjusting env values as needed:
-  { "scenario_config": { "image": "quay.io/krkn-chaos/krkn-hub:<name>", "name": "<name>", "env": { ... } } }
+CHAOS — single scenario (same as one entry in the catalog):
+  "chaos": { "scenario_config": { "image": "quay.io/krkn-chaos/krkn-hub:<name>", "name": "<name>", "env": { ... } } }
+
+CHAOS — multiple different scenarios (e.g. pod kill + network chaos):
+  "chaos": {
+    "scenario_configs": [
+      { "image": "quay.io/krkn-chaos/krkn-hub:pod-scenarios", "name": "pod-scenarios", "env": { ... } },
+      { "image": "quay.io/krkn-chaos/krkn-hub:network-chaos", "name": "network-chaos", "env": { ... } }
+    ]
+  }
 
 WAIT CONDITIONS (use these exactly):
   PVC:            --for=jsonpath={.status.phase}=Bound
